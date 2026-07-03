@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+<title>Registro de Vendas</title>
+<link rel="icon" href="data:,">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font-family: 'Work Sans', sans-serif; }
+  input, button { font-family: inherit; }
+  button { cursor: pointer; }
+</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback, useContext, createContext } = React;
+
+// ---------- local storage (substitui window.storage do Claude) ----------
+const storage = {
+  async get(key) {
+    const v = localStorage.getItem(key);
+    if (v === null) return null;
+    return { key, value: v };
+  },
+  async set(key, value) {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+  async delete(key) {
+    localStorage.removeItem(key);
+    return { key, deleted: true };
+  },
+  async list(prefix = "") {
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith(prefix));
+    return { keys };
+  },
+};
+
+// ---------- icons (emoji, sem dependencia externa) ----------
+const ICONS = {
+  Camera: "📷", Plus: "＋", List: "≡", TrendingUp: "📈", Settings: "⚙️", X: "✕",
+  Check: "✓", ChevronLeft: "‹", ChevronRight: "›", Trash2: "🗑️", ImageOff: "🚫",
+  Loader2: "⏳", Clock: "🕒", PackageCheck: "📦", Search: "🔍", UserPlus: "➕",
+  MessageCircle: "💬", Moon: "🌙", Sun: "☀️", AlertTriangle: "⚠️", ArrowUp: "↑",
+  ArrowDown: "↓", Gift: "🎁", Share2: "📤", Copy: "📋", CheckCircle2: "✅",
+  Circle: "◯", Home: "🏠", Users: "👥",
+};
+function Icon({ name, size = 16, style }) {
+  return <span style={{ fontSize: size, lineHeight: 1, display: "inline-block", ...style }}>{ICONS[name] || ""}</span>;
+}
+
+// ---------- theming ----------
+const LIGHT = {
+  bg: "#EFE6DA", card: "#FBF7EF", ink: "#2B2620", inkSoft: "#6B6155",
+  green: "#2F5D50", greenDark: "#20423A", gold: "#B8874F", rose: "#B4535F",
+  line: "rgba(43,38,32,0.14)",
+};
+const DARK = {
+  bg: "#1B1712", card: "#26201A", ink: "#F3ECE1", inkSoft: "#B9AD9D",
+  green: "#4B9483", greenDark: "#16302A", gold: "#D8A867", rose: "#D9838F",
+  line: "rgba(255,255,255,0.12)",
+};
+const ThemeContext = createContext(LIGHT);
+
+// ---------- helpers ----------
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const monthKey = (iso) => iso.slice(0, 7);
+const brl = (n) => (n || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+
+function prevMonthKey(mk) {
+  const [y, m] = mk.split("-").map(Number);
+  const d = new Date(y, m - 2, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+function daysInMonth(mk) {
+  const [y, m] = mk.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+function waLink(telefone, text) {
+  let digits = (telefone || "").replace(/\D/g, "");
+  if (digits && !digits.startsWith("55")) digits = "55" + digits;
+  const base = digits ? `https://wa.me/${digits}` : "https://wa.me/";
+  return text ? `${base}?text=${encodeURIComponent(text)}` : base;
+}
+
+const DEFAULT_SETTINGS = {
+  loja: "Minha loja",
+  tiers: [{ min: 0, pct: 2 }, { min: 5000, pct: 3 }, { min: 10000, pct: 5 }],
+  metaMensal: 15000,
+  diasAlertaCondicional: 7,
+  darkMode: false,
+};
+
+function tierFor(total, tiers) {
+  const sorted = [...tiers].sort((a, b) => a.min - b.min);
+  let current = sorted[0] || { min: 0, pct: 0 };
+  for (const t of sorted) if (total >= t.min) current = t;
+  const idx = sorted.indexOf(current);
+  const next = sorted[idx + 1] || null;
+  return { current, next, sorted };
+}
+
+function fileToCompressedDataURL(file, maxW = 900, quality = 0.6) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Falha ao ler arquivo"));
+    reader.onload = () => {
+      const img = new window.Image();
+      img.onerror = () => reject(new Error("Falha ao carregar imagem"));
+      img.onload = () => {
+        const scale = Math.min(1, maxW / img.width);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// ---------- small atoms ----------
+function TagHole() {
+  const T = useContext(ThemeContext);
+  return (
+    <div style={{
+      width: 14, height: 14, borderRadius: "50%", background: T.bg,
+      border: `2px solid ${T.line}`, position: "absolute", top: 14, left: 14,
+      boxShadow: "inset 0 1px 2px rgba(0,0,0,0.15)",
+    }} />
+  );
+}
+function SectionLabel({ children }) {
+  const T = useContext(ThemeContext);
+  return <div style={{ color: T.inkSoft, fontSize: 12 }} className="mb-2 uppercase tracking-wide">{children}</div>;
+}
+
+function SimpleBarChart({ data, T }) {
+  const max = Math.max(1, ...data.map((d) => d.valor));
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 140 }}>
+        {data.map((d, i) => (
+          <div key={i} title={`dia ${d.dia}: ${brl(d.valor)}`}
+            style={{ flex: 1, height: "100%", display: "flex", alignItems: "flex-end" }}>
+            <div style={{
+              width: "100%", background: d.valor > 0 ? T.green : "transparent",
+              height: `${(d.valor / max) * 100}%`, borderRadius: "3px 3px 0 0",
+              minHeight: d.valor > 0 ? 3 : 0,
+            }} />
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", color: T.inkSoft, fontSize: 10, marginTop: 4 }}>
+        <span>1</span><span>{Math.round(data.length / 2)}</span><span>{data.length}</span>
+      </div>
+    </div>
+  );
+}
+
+function SaleTag({ sale, onOpen, onConfirm, onDelete, onToggleConferida }) {
+  const T = useContext(ThemeContext);
+  const pending = sale.status === "pendente";
+  const displayDate = pending ? sale.dataLevado : sale.date;
+  const displayValor = pending ? sale.valorLevado : sale.valor;
+  return (
+    <div
+      onClick={() => (pending ? onConfirm(sale) : onOpen(sale))}
+      style={{
+        background: T.card, border: pending ? `1px solid ${T.gold}` : `1px solid ${T.line}`,
+        borderRadius: 16, position: "relative", padding: "14px 16px 14px 40px",
+        marginBottom: 10, cursor: "pointer",
+      }}
+      className="flex items-center justify-between gap-3"
+    >
+      <TagHole />
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: T.inkSoft, fontSize: 12 }}>
+            {new Date(displayDate + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short" })}
+          </span>
+          {pending && (
+            <span style={{ background: T.gold, color: "#fff", fontSize: 10, borderRadius: 999, padding: "2px 8px", display: "flex", alignItems: "center", gap: 4 }}>
+              <Icon name="Clock" size={10} /> condicional
+            </span>
+          )}
+          {!pending && (
+            <button onClick={(e) => { e.stopPropagation(); onToggleConferida(sale); }}
+              style={{ color: sale.conferida ? T.green : T.inkSoft, fontSize: 10, background: "none", border: "none", display: "flex", alignItems: "center", gap: 4, padding: 0 }}>
+              <Icon name={sale.conferida ? "CheckCircle2" : "Circle"} size={11} />
+              {sale.conferida ? "conferida" : "conferir"}
+            </button>
+          )}
+        </div>
+        <div style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontWeight: 600, fontSize: 20 }}>
+          {brl(displayValor)}
+          {pending && <span style={{ fontSize: 12, color: T.inkSoft, fontFamily: "'Work Sans', sans-serif" }}> levado</span>}
+        </div>
+        {sale.clienteNome ? <div style={{ color: T.inkSoft, fontSize: 13 }} className="truncate">{sale.clienteNome}</div> : null}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        {sale.foto ? (
+          <img src={sale.foto} alt="comprovante" style={{ width: 46, height: 46, objectFit: "cover", borderRadius: 8, border: `1px solid ${T.line}` }} />
+        ) : (
+          <div style={{ width: 46, height: 46, borderRadius: 8, border: `1px dashed ${T.line}`, color: T.inkSoft, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Icon name="ImageOff" size={18} />
+          </div>
+        )}
+        <button onClick={(e) => { e.stopPropagation(); onDelete(sale); }} style={{ color: T.rose, background: "none", border: "none", padding: 4 }} aria-label="Excluir venda">
+          <Icon name="Trash2" size={16} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MonthSwitcher({ month, setMonth }) {
+  const T = useContext(ThemeContext);
+  const shift = (delta) => {
+    const [y, m] = month.split("-").map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    setMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  };
+  const label = new Date(month + "-02").toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+      <button onClick={() => shift(-1)} style={{ color: T.green, background: "none", border: "none", fontSize: 22 }}>‹</button>
+      <span style={{ fontFamily: "'Fraunces', serif", color: T.ink, textTransform: "capitalize", fontSize: 17 }}>{label}</span>
+      <button onClick={() => shift(1)} style={{ color: T.green, background: "none", border: "none", fontSize: 22 }}>›</button>
+    </div>
+  );
+}
+
+// ---------- Registrar ----------
+function ClientAutocomplete({ clients, value, onChange, telefone, setTelefone, aniversario, setAniversario, required }) {
+  const T = useContext(ThemeContext);
+  const [open, setOpen] = useState(false);
+  const matches = value.trim() ? clients.filter((c) => c.nome.toLowerCase().includes(value.trim().toLowerCase())).slice(0, 5) : [];
+  const isExisting = clients.some((c) => c.nome.toLowerCase() === value.trim().toLowerCase());
+
+  return (
+    <div>
+      <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">Cliente {required ? "" : "(opcional)"}</label>
+      <div style={{ position: "relative" }}>
+        <input type="text" placeholder="Nome do cliente" value={value}
+          onChange={(e) => { onChange(e.target.value, null); setOpen(true); }}
+          onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)}
+          style={{ color: T.ink, border: `1px solid ${required && !value.trim() ? T.rose : T.line}`, borderRadius: 10 }}
+          className="px-3 py-2 w-full outline-none" />
+        {open && matches.length > 0 && (
+          <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 10, position: "absolute", zIndex: 10, width: "100%", marginTop: 4 }}>
+            {matches.map((c) => (
+              <div key={c.id} onMouseDown={() => { onChange(c.nome, c.id); setTelefone(c.telefone || ""); setAniversario(c.aniversario || ""); setOpen(false); }}
+                style={{ padding: "8px 12px", color: T.ink, fontSize: 14, cursor: "pointer" }}>{c.nome}</div>
+            ))}
+          </div>
+        )}
+      </div>
+      {value.trim() && !isExisting && <p style={{ color: T.gold, fontSize: 11 }} className="mt-1">cliente novo — vai ser salvo na sua lista</p>}
+      {value.trim() && (
+        <div className="flex gap-2 mt-2">
+          <input type="tel" placeholder="Telefone (opcional)" value={telefone} onChange={(e) => setTelefone(e.target.value)}
+            style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10, fontSize: 13 }} className="px-3 py-2 flex-1 outline-none" />
+          <input type="date" title="Aniversário" value={aniversario} onChange={(e) => setAniversario(e.target.value)}
+            style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10, fontSize: 13 }} className="px-2 py-2 outline-none" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RegistrarTab({ clients, onSave, saving }) {
+  const T = useContext(ThemeContext);
+  const [tipo, setTipo] = useState("direta");
+  const [valor, setValor] = useState("");
+  const [clienteNome, setClienteNome] = useState("");
+  const [clienteId, setClienteId] = useState(null);
+  const [telefone, setTelefone] = useState("");
+  const [aniversario, setAniversario] = useState("");
+  const [caixa, setCaixa] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [foto, setFoto] = useState(null);
+  const [compressing, setCompressing] = useState(false);
+  const fileRef = useRef(null);
+
+  const handleFile = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setCompressing(true);
+    try { setFoto(await fileToCompressedDataURL(f)); }
+    catch { alert("Não consegui processar a foto. Tenta de novo."); }
+    finally { setCompressing(false); }
+  };
+
+  const valid = parseFloat(valor.replace(",", ".")) > 0;
+  const clienteOk = tipo === "direta" || clienteNome.trim();
+
+  const submit = () => {
+    if (!valid || !clienteOk) return;
+    const num = parseFloat(valor.replace(",", "."));
+    const base = {
+      id: uid(), clienteId, clienteNome: clienteNome.trim(), clienteTelefone: telefone.trim(),
+      clienteAniversario: aniversario, caixa: caixa.trim(), foto, conferida: false,
+    };
+    if (tipo === "condicional") onSave({ ...base, tipo: "condicional", status: "pendente", dataLevado: date, valorLevado: num, date, valor: 0 });
+    else onSave({ ...base, tipo: "direta", status: "confirmada", date, valor: num });
+    setValor(""); setClienteNome(""); setClienteId(null); setTelefone(""); setAniversario("");
+    setCaixa(""); setFoto(null); setDate(todayISO());
+  };
+
+  return (
+    <div className="px-4 pt-2 pb-24">
+      <h1 style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 26, fontWeight: 700 }} className="mb-1">Nova venda</h1>
+      <p style={{ color: T.inkSoft, fontSize: 13 }} className="mb-5">Registre na hora, com foto do comprovante, pra ter sua própria prova.</p>
+
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 20 }} className="p-4 space-y-4">
+        <div>
+          <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">Tipo de venda</label>
+          <div style={{ background: T.bg, borderRadius: 12, display: "flex", padding: 4 }}>
+            {[{ id: "direta", label: "Venda direta" }, { id: "condicional", label: "Condicional" }].map((opt) => (
+              <button key={opt.id} onClick={() => setTipo(opt.id)} style={{
+                flex: 1, borderRadius: 9, padding: "8px 0", fontSize: 13, fontWeight: 600, border: "none",
+                background: tipo === opt.id ? T.green : "transparent", color: tipo === opt.id ? "#fff" : T.inkSoft,
+              }}>{opt.label}</button>
+            ))}
+          </div>
+          {tipo === "condicional" && (
+            <p style={{ color: T.inkSoft, fontSize: 12 }} className="mt-2">
+              Registra o valor que a cliente levou pra casa. Fica <b>pendente</b> até você confirmar quanto ela comprou de fato.
+            </p>
+          )}
+        </div>
+
+        <div>
+          <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">{tipo === "condicional" ? "Valor levado (condicional)" : "Valor da venda"}</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: T.ink }}>R$</span>
+            <input inputMode="decimal" placeholder="0,00" value={valor} onChange={(e) => setValor(e.target.value)}
+              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, color: T.ink, borderBottom: `2px solid ${T.line}`, background: "transparent", width: "100%", padding: "4px 0", border: "none", borderBottomWidth: 2, borderBottomStyle: "solid", borderBottomColor: T.line }}
+              className="outline-none" />
+          </div>
+        </div>
+
+        <div>
+          <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">{tipo === "condicional" ? "Data que levou" : "Data"}</label>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
+            style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10 }} className="px-3 py-2 w-full outline-none" />
+        </div>
+
+        <ClientAutocomplete clients={clients} value={clienteNome}
+          onChange={(v, id) => { setClienteNome(v); setClienteId(id); }}
+          telefone={telefone} setTelefone={setTelefone} aniversario={aniversario} setAniversario={setAniversario}
+          required={tipo === "condicional"} />
+
+        <div>
+          <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">Nº do caixa / quem bateu (opcional)</label>
+          <input type="text" placeholder="Ex: caixa 2, Fernanda" value={caixa} onChange={(e) => setCaixa(e.target.value)}
+            style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10 }} className="px-3 py-2 w-full outline-none" />
+        </div>
+
+        <div>
+          <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">Foto {tipo === "condicional" ? "da nota/lista do que levou" : "do comprovante"}</label>
+          <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+          {foto ? (
+            <div style={{ position: "relative", display: "inline-block" }}>
+              <img src={foto} alt="comprovante" style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 12, border: `1px solid ${T.line}` }} />
+              <button onClick={() => setFoto(null)} style={{ background: T.rose, color: "#fff", border: "none", position: "absolute", top: -8, right: -8, borderRadius: 999, width: 24, height: 24 }}>✕</button>
+            </div>
+          ) : (
+            <button onClick={() => fileRef.current?.click()} disabled={compressing}
+              style={{ border: `2px dashed ${T.line}`, color: T.green, borderRadius: 12, width: "100%", padding: "18px 0", background: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+              <Icon name={compressing ? "Loader2" : "Camera"} size={22} />
+              <span style={{ fontSize: 13 }}>{compressing ? "Processando foto..." : "Tirar foto do comprovante"}</span>
+            </button>
+          )}
+        </div>
+
+        <button onClick={submit} disabled={!valid || !clienteOk || saving}
+          style={{ background: valid && clienteOk ? T.green : T.line, color: valid ? "#fff" : T.inkSoft, borderRadius: 12, fontWeight: 600, border: "none", width: "100%", padding: "12px 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          <Icon name="Check" size={18} />
+          {tipo === "condicional" ? "Registrar condicional" : "Salvar venda"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Vendas ----------
+function VendasTab({ sales, month, setMonth, onOpen, onConfirm, onDelete, onToggleConferida }) {
+  const T = useContext(ThemeContext);
+  const [busca, setBusca] = useState("");
+  const pendentes = sales.filter((s) => s.status === "pendente")
+    .filter((s) => s.clienteNome.toLowerCase().includes(busca.toLowerCase()))
+    .sort((a, b) => (a.dataLevado < b.dataLevado ? 1 : -1));
+  const totalPendente = pendentes.reduce((a, s) => a + (s.valorLevado || 0), 0);
+  const monthSales = sales.filter((s) => s.status === "confirmada" && monthKey(s.date) === month)
+    .filter((s) => (s.clienteNome || "").toLowerCase().includes(busca.toLowerCase()))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  const total = monthSales.reduce((a, s) => a + s.valor, 0);
+
+  return (
+    <div className="px-4 pt-2 pb-24">
+      <h1 style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 26, fontWeight: 700 }} className="mb-3">Minhas vendas</h1>
+      <div style={{ position: "relative", marginBottom: 16 }}>
+        <span style={{ position: "absolute", left: 12, top: 9, color: T.inkSoft }}><Icon name="Search" size={16} /></span>
+        <input placeholder="Buscar por cliente" value={busca} onChange={(e) => setBusca(e.target.value)}
+          style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10, paddingLeft: 36 }} className="py-2 w-full outline-none" />
+      </div>
+
+      {pendentes.length > 0 && (
+        <div className="mb-6">
+          <div style={{ color: T.gold, fontSize: 12 }} className="mb-2 uppercase tracking-wide flex items-center gap-1">
+            <Icon name="Clock" size={13} /> Aguardando confirmação ({pendentes.length}) · {brl(totalPendente)} em condicional
+          </div>
+          {pendentes.map((s) => <SaleTag key={s.id} sale={s} onOpen={onOpen} onConfirm={onConfirm} onDelete={onDelete} onToggleConferida={onToggleConferida} />)}
+        </div>
+      )}
+
+      <SectionLabel>Vendas confirmadas</SectionLabel>
+      <MonthSwitcher month={month} setMonth={setMonth} />
+      <div style={{ color: T.inkSoft, fontSize: 13 }} className="mb-3">{monthSales.length} venda{monthSales.length !== 1 ? "s" : ""} · total {brl(total)}</div>
+      {monthSales.length === 0 ? (
+        <div style={{ color: T.inkSoft, fontSize: 14 }} className="text-center py-10">Nenhuma venda confirmada neste mês ainda.</div>
+      ) : monthSales.map((s) => <SaleTag key={s.id} sale={s} onOpen={onOpen} onConfirm={onConfirm} onDelete={onDelete} onToggleConferida={onToggleConferida} />)}
+    </div>
+  );
+}
+
+// ---------- Desempenho ----------
+function DesempenhoTab({ sales, month, setMonth, settings }) {
+  const T = useContext(ThemeContext);
+  const [copied, setCopied] = useState(false);
+  const monthSales = sales.filter((s) => s.status === "confirmada" && monthKey(s.date) === month);
+  const total = monthSales.reduce((a, s) => a + s.valor, 0);
+  const { current, next, sorted } = tierFor(total, settings.tiers);
+  const comissao = total * (current.pct / 100);
+  const pendentes = sales.filter((s) => s.status === "pendente");
+  const totalPendente = pendentes.reduce((a, s) => a + (s.valorLevado || 0), 0);
+  let progressPct = 100;
+  if (next) { const span = next.min - current.min; progressPct = Math.max(0, Math.min(100, ((total - current.min) / span) * 100)); }
+
+  const topClientes = Object.values(monthSales.reduce((acc, s) => {
+    const k = s.clienteNome || "sem nome";
+    acc[k] = acc[k] || { nome: k, total: 0 };
+    acc[k].total += s.valor;
+    return acc;
+  }, {})).sort((a, b) => b.total - a.total).slice(0, 3);
+
+  const resumoTexto = () => {
+    const label = new Date(month + "-02").toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+    let txt = `Resumo de vendas — ${label}\n\nTotal vendido: ${brl(total)}\nVendas confirmadas: ${monthSales.length}\nFaixa de comissão: ${current.pct}%\nComissão estimada: ${brl(comissao)}\n`;
+    if (totalPendente > 0) txt += `Condicional pendente: ${brl(totalPendente)} (${pendentes.length} cliente(s))\n`;
+    if (topClientes.length) txt += `\nTop clientes:\n` + topClientes.map((c, i) => `${i + 1}. ${c.nome} — ${brl(c.total)}`).join("\n");
+    return txt;
+  };
+
+  return (
+    <div className="px-4 pt-2 pb-24">
+      <h1 style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 26, fontWeight: 700 }} className="mb-4">Desempenho</h1>
+      <MonthSwitcher month={month} setMonth={setMonth} />
+
+      <div style={{ background: T.greenDark, borderRadius: 20 }} className="p-5 mb-4 text-white">
+        <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 12 }}>Total vendido no mês</div>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 34, fontWeight: 700 }}>{brl(total)}</div>
+        <div style={{ color: "rgba(255,255,255,0.85)", fontSize: 13 }} className="mt-1">Faixa atual: <b>{current.pct}%</b> de comissão</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 18 }} className="mt-2">≈ {brl(comissao)} de comissão estimada</div>
+      </div>
+
+      {totalPendente > 0 && (
+        <div style={{ border: `1px dashed ${T.gold}`, borderRadius: 16, color: T.ink }} className="p-4 mb-4">
+          <div style={{ color: T.gold, fontSize: 12 }} className="mb-1 flex items-center gap-1"><Icon name="Clock" size={13} /> ainda não entra na comissão</div>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 600 }}>{brl(totalPendente)} em condicional</div>
+          <div style={{ color: T.inkSoft, fontSize: 12 }}>{pendentes.length} cliente{pendentes.length !== 1 ? "s" : ""} com roupa em casa aguardando confirmação</div>
+        </div>
+      )}
+
+      {next ? (
+        <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16 }} className="p-4 mb-4">
+          <div style={{ color: T.inkSoft, fontSize: 13 }} className="mb-2">Faltam <b style={{ color: T.ink }}>{brl(Math.max(0, next.min - total))}</b> para a próxima faixa ({next.pct}%)</div>
+          <div style={{ background: T.bg, borderRadius: 999, height: 10 }}>
+            <div style={{ width: `${progressPct}%`, background: T.gold, height: 10, borderRadius: 999, transition: "width 0.4s" }} />
+          </div>
+        </div>
+      ) : (
+        <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16, color: T.gold }} className="p-4 mb-4 text-sm">Você atingiu a maior faixa de comissão disponível 🎉</div>
+      )}
+
+      <SectionLabel>Faixas configuradas</SectionLabel>
+      <div className="space-y-2 mb-5">
+        {sorted.map((t, i) => (
+          <div key={i} style={{ background: t.min === current.min ? T.gold : T.card, border: `1px solid ${T.line}`, borderRadius: 12, color: t.min === current.min ? "#fff" : T.ink }} className="px-4 py-2 flex justify-between text-sm">
+            <span>a partir de {brl(t.min)}</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{t.pct}%</span>
+          </div>
+        ))}
+      </div>
+
+      {topClientes.length > 0 && (
+        <>
+          <SectionLabel>Top clientes do mês</SectionLabel>
+          <div className="space-y-2 mb-5">
+            {topClientes.map((c, i) => (
+              <div key={i} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 12, color: T.ink }} className="px-4 py-2 flex justify-between text-sm">
+                <span>{i + 1}. {c.nome}</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{brl(c.total)}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <SectionLabel>Fechamento do mês</SectionLabel>
+      <div className="flex gap-2">
+        <button onClick={() => { navigator.clipboard?.writeText(resumoTexto()); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+          style={{ border: `1px solid ${T.line}`, color: T.ink, borderRadius: 12, background: "none" }} className="flex-1 py-2.5 flex items-center justify-center gap-2 text-sm">
+          <Icon name="Copy" size={15} /> {copied ? "Copiado ✓" : "Copiar resumo"}
+        </button>
+        <a href={waLink("", resumoTexto())} target="_blank" rel="noreferrer" style={{ background: T.green, color: "#fff", borderRadius: 12, textDecoration: "none" }} className="flex-1 py-2.5 flex items-center justify-center gap-2 text-sm">
+          <Icon name="Share2" size={15} /> Compartilhar
+        </a>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Clientes ----------
+function ClientRow({ client, stats, onOpen }) {
+  const T = useContext(ThemeContext);
+  return (
+    <div onClick={() => onOpen(client)} style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 14 }} className="p-3 mb-2 flex items-center justify-between gap-3 cursor-pointer">
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 16, fontWeight: 600 }} className="truncate">{client.nome}</span>
+          {stats.count >= 3 && <span style={{ background: T.gold, color: "#fff", fontSize: 10, borderRadius: 999, padding: "2px 8px" }}>frequente</span>}
+        </div>
+        <div style={{ color: T.inkSoft, fontSize: 12 }}>{stats.count} compra{stats.count !== 1 ? "s" : ""} · {brl(stats.total)}</div>
+      </div>
+      {client.telefone && (
+        <a href={waLink(client.telefone, `Oi ${client.nome.split(" ")[0]}, tudo bem?`)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+          style={{ background: "#25D366", color: "#fff", borderRadius: 999, padding: 8, display: "flex", textDecoration: "none" }} aria-label="WhatsApp">
+          <Icon name="MessageCircle" size={18} />
+        </a>
+      )}
+    </div>
+  );
+}
+
+function ClientDetailModal({ client, sales, onClose }) {
+  const T = useContext(ThemeContext);
+  if (!client) return null;
+  const historico = sales.filter((s) => s.clienteId === client.id || s.clienteNome === client.nome).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const total = historico.filter((s) => s.status === "confirmada").reduce((a, s) => a + s.valor, 0);
+  return (
+    <div onClick={onClose} style={{ background: "rgba(0,0,0,0.75)" }} className="fixed inset-0 z-50 flex items-center justify-center p-6">
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: 16, maxHeight: "80vh", overflowY: "auto" }} className="max-w-sm w-full p-4">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }} className="mb-2">
+          <div>
+            <div style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 20, fontWeight: 700 }}>{client.nome}</div>
+            <div style={{ color: T.inkSoft, fontSize: 13 }}>{brl(total)} em compras confirmadas</div>
+          </div>
+          <button onClick={onClose} style={{ color: T.inkSoft, background: "none", border: "none" }}><Icon name="X" size={20} /></button>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} className="mb-3">
+          {client.telefone && (
+            <a href={waLink(client.telefone, `Oi ${client.nome.split(" ")[0]}, tudo bem?`)} target="_blank" rel="noreferrer"
+              style={{ background: "#25D366", color: "#fff", borderRadius: 10, textDecoration: "none" }} className="px-3 py-1.5 text-xs flex items-center gap-1">
+              <Icon name="MessageCircle" size={13} /> WhatsApp
+            </a>
+          )}
+          {client.aniversario && (
+            <span style={{ border: `1px solid ${T.line}`, color: T.inkSoft, borderRadius: 10 }} className="px-3 py-1.5 text-xs flex items-center gap-1">
+              <Icon name="Gift" size={13} /> {new Date(client.aniversario + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "long" })}
+            </span>
+          )}
+        </div>
+        <SectionLabel>Histórico de compras</SectionLabel>
+        {historico.length === 0 ? <div style={{ color: T.inkSoft, fontSize: 13 }} className="text-center py-6">Nenhuma compra registrada ainda.</div> : historico.map((s) => (
+          <div key={s.id} style={{ borderBottom: `1px solid ${T.line}` }} className="py-2 flex justify-between text-sm">
+            <span style={{ color: T.inkSoft }}>{new Date((s.status === "pendente" ? s.dataLevado : s.date) + "T00:00:00").toLocaleDateString("pt-BR")}</span>
+            <span style={{ color: T.ink, fontFamily: "'IBM Plex Mono', monospace" }}>{brl(s.status === "pendente" ? s.valorLevado : s.valor)}{s.status === "pendente" ? " (pendente)" : ""}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function NewClientForm({ onSave, onCancel }) {
+  const T = useContext(ThemeContext);
+  const [nome, setNome] = useState("");
+  const [telefone, setTelefone] = useState("");
+  const [aniversario, setAniversario] = useState("");
+  return (
+    <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16 }} className="p-3 mb-4 space-y-2">
+      <input placeholder="Nome" value={nome} onChange={(e) => setNome(e.target.value)} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10 }} className="px-3 py-2 w-full outline-none" />
+      <div className="flex gap-2">
+        <input placeholder="Telefone" value={telefone} onChange={(e) => setTelefone(e.target.value)} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10 }} className="px-3 py-2 flex-1 outline-none" />
+        <input type="date" value={aniversario} onChange={(e) => setAniversario(e.target.value)} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10 }} className="px-2 py-2 outline-none" />
+      </div>
+      <div className="flex gap-2">
+        <button onClick={onCancel} style={{ color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 10, background: "none" }} className="flex-1 py-2 text-sm">Cancelar</button>
+        <button onClick={() => nome.trim() && onSave({ nome, telefone, aniversario })} style={{ background: T.green, color: "#fff", borderRadius: 10, border: "none" }} className="flex-1 py-2 text-sm">Salvar cliente</button>
+      </div>
+    </div>
+  );
+}
+
+function ClientesTab({ clients, sales, onUpsertClient }) {
+  const T = useContext(ThemeContext);
+  const [busca, setBusca] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const [openClient, setOpenClient] = useState(null);
+  const withStats = clients.map((c) => {
+    const compras = sales.filter((s) => (s.clienteId === c.id || s.clienteNome === c.nome) && s.status === "confirmada");
+    return { client: c, total: compras.reduce((a, s) => a + s.valor, 0), count: compras.length };
+  }).filter((x) => x.client.nome.toLowerCase().includes(busca.toLowerCase())).sort((a, b) => b.total - a.total);
+
+  return (
+    <div className="px-4 pt-2 pb-24">
+      <div className="flex items-center justify-between mb-3">
+        <h1 style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 26, fontWeight: 700 }}>Clientes</h1>
+        <button onClick={() => setShowForm((v) => !v)} style={{ color: T.green, background: "none", border: "none" }}><Icon name="UserPlus" size={22} /></button>
+      </div>
+      {showForm && <NewClientForm onCancel={() => setShowForm(false)} onSave={async (data) => { await onUpsertClient(data); setShowForm(false); }} />}
+      <div style={{ position: "relative", marginBottom: 16 }}>
+        <span style={{ position: "absolute", left: 12, top: 9, color: T.inkSoft }}><Icon name="Search" size={16} /></span>
+        <input placeholder="Buscar cliente" value={busca} onChange={(e) => setBusca(e.target.value)} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10, paddingLeft: 36 }} className="py-2 w-full outline-none" />
+      </div>
+      {withStats.length === 0 ? (
+        <div style={{ color: T.inkSoft, fontSize: 14 }} className="text-center py-10">Nenhum cliente ainda — eles aparecem aqui conforme você registra vendas.</div>
+      ) : withStats.map(({ client, total, count }) => <ClientRow key={client.id} client={client} stats={{ total, count }} onOpen={setOpenClient} />)}
+      <ClientDetailModal client={openClient} sales={sales} onClose={() => setOpenClient(null)} />
+    </div>
+  );
+}
+
+// ---------- Início ----------
+function InicioTab({ sales, settings, goToRegistrar }) {
+  const T = useContext(ThemeContext);
+  const nowMonth = monthKey(todayISO());
+  const monthSales = sales.filter((s) => s.status === "confirmada" && monthKey(s.date) === nowMonth);
+  const total = monthSales.reduce((a, s) => a + s.valor, 0);
+  const meta = settings.metaMensal || 0;
+  const metaPct = meta > 0 ? Math.min(100, (total / meta) * 100) : 0;
+  const dim = daysInMonth(nowMonth);
+  const diasPassados = Math.min(new Date().getDate(), dim);
+  const esperado = meta * (diasPassados / dim);
+  const diff = total - esperado;
+  const noRitmo = diff >= 0;
+  const prevKey = prevMonthKey(nowMonth);
+  const prevTotal = sales.filter((s) => s.status === "confirmada" && monthKey(s.date) === prevKey).reduce((a, s) => a + s.valor, 0);
+  const variacao = prevTotal > 0 ? ((total - prevTotal) / prevTotal) * 100 : null;
+  const chartData = Array.from({ length: dim }, (_, i) => {
+    const day = i + 1;
+    const val = monthSales.filter((s) => new Date(s.date + "T00:00:00").getDate() === day).reduce((a, s) => a + s.valor, 0);
+    return { dia: day, valor: val };
+  });
+  const alertas = sales.filter((s) => s.status === "pendente")
+    .map((s) => ({ ...s, dias: daysBetween(s.dataLevado, todayISO()) }))
+    .filter((s) => s.dias >= (settings.diasAlertaCondicional || 7)).sort((a, b) => b.dias - a.dias);
+
+  return (
+    <div className="px-4 pt-2 pb-24">
+      <h1 style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 26, fontWeight: 700 }} className="mb-1">Olá!</h1>
+      <p style={{ color: T.inkSoft, fontSize: 13 }} className="mb-5">Seu resumo de {new Date().toLocaleDateString("pt-BR", { month: "long" })}.</p>
+
+      <div style={{ background: T.greenDark, borderRadius: 20 }} className="p-5 mb-4 text-white">
+        <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 12 }}>Meta do mês</div>
+        <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 8 }}>
+          <span style={{ fontFamily: "'Fraunces', serif", fontSize: 30, fontWeight: 700 }}>{brl(total)}</span>
+          <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 13 }}>de {brl(meta)}</span>
+        </div>
+        <div style={{ background: "rgba(255,255,255,0.2)", borderRadius: 999, height: 12 }}>
+          <div style={{ width: `${metaPct}%`, background: T.gold, height: 12, borderRadius: 999, transition: "width 0.4s" }} />
+        </div>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.85)" }} className="mt-2">{metaPct.toFixed(0)}% da meta atingida</div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16 }} className="p-3">
+          <div style={{ color: T.inkSoft, fontSize: 11 }}>Ritmo do mês</div>
+          <div style={{ color: noRitmo ? T.green : T.rose, fontSize: 14, fontWeight: 600 }} className="flex items-center gap-1 mt-1">
+            <Icon name={noRitmo ? "ArrowUp" : "ArrowDown"} size={13} /> {noRitmo ? "no ritmo" : "atrasada"}
+          </div>
+          <div style={{ color: T.inkSoft, fontSize: 11 }}>{brl(Math.abs(diff))} {noRitmo ? "à frente" : "atrás"}</div>
+        </div>
+        <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16 }} className="p-3">
+          <div style={{ color: T.inkSoft, fontSize: 11 }}>Vs. mês passado</div>
+          {variacao === null ? <div style={{ color: T.inkSoft, fontSize: 14 }} className="mt-1">sem dados</div> : (
+            <div style={{ color: variacao >= 0 ? T.green : T.rose, fontSize: 14, fontWeight: 600 }} className="flex items-center gap-1 mt-1">
+              <Icon name={variacao >= 0 ? "ArrowUp" : "ArrowDown"} size={13} /> {Math.abs(variacao).toFixed(0)}%
+            </div>
+          )}
+        </div>
+      </div>
+
+      {alertas.length > 0 && (
+        <div style={{ border: `1px solid ${T.rose}`, borderRadius: 16 }} className="p-4 mb-4">
+          <div style={{ color: T.rose, fontSize: 12 }} className="mb-2 flex items-center gap-1"><Icon name="AlertTriangle" size={13} /> condicionais pra cobrar</div>
+          {alertas.slice(0, 3).map((s) => (
+            <div key={s.id} className="flex items-center justify-between text-sm mb-1">
+              <span style={{ color: T.ink }}>{s.clienteNome} · {s.dias}d</span>
+              {s.clienteTelefone ? (
+                <a href={waLink(s.clienteTelefone, `Oi ${s.clienteNome.split(" ")[0]}, tudo bem? Posso confirmar com você sobre as peças que ficaram em condicional?`)} target="_blank" rel="noreferrer" style={{ color: "#25D366" }}>
+                  <Icon name="MessageCircle" size={16} />
+                </a>
+              ) : <span style={{ color: T.inkSoft, fontSize: 11 }}>sem telefone</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <SectionLabel>Vendas do mês por dia</SectionLabel>
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 16 }} className="p-3 mb-4">
+        <SimpleBarChart data={chartData} T={T} />
+      </div>
+
+      <button onClick={goToRegistrar} style={{ background: T.green, color: "#fff", borderRadius: 14, border: "none", width: "100%", padding: "12px 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontWeight: 600 }}>
+        <Icon name="Plus" size={18} /> Registrar nova venda
+      </button>
+    </div>
+  );
+}
+
+// ---------- Config ----------
+function ConfigTab({ settings, onSave }) {
+  const T = useContext(ThemeContext);
+  const [local, setLocal] = useState(settings);
+  const [savedFlash, setSavedFlash] = useState(false);
+  useEffect(() => setLocal(settings), [settings]);
+  const updateTier = (i, field, value) => { const tiers = [...local.tiers]; tiers[i] = { ...tiers[i], [field]: Number(value) }; setLocal({ ...local, tiers }); };
+  const addTier = () => setLocal({ ...local, tiers: [...local.tiers, { min: 0, pct: 0 }] });
+  const removeTier = (i) => setLocal({ ...local, tiers: local.tiers.filter((_, idx) => idx !== i) });
+  const save = () => { onSave(local); setSavedFlash(true); setTimeout(() => setSavedFlash(false), 1500); };
+
+  return (
+    <div className="px-4 pt-2 pb-24">
+      <h1 style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 26, fontWeight: 700 }} className="mb-5">Configurações</h1>
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 20 }} className="p-4 space-y-3 mb-4">
+        <div>
+          <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">Nome da loja</label>
+          <input value={local.loja} onChange={(e) => setLocal({ ...local, loja: e.target.value })} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10 }} className="px-3 py-2 w-full outline-none" />
+        </div>
+        <div>
+          <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">Meta mensal (R$)</label>
+          <input type="number" value={local.metaMensal} onChange={(e) => setLocal({ ...local, metaMensal: Number(e.target.value) })} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10 }} className="px-3 py-2 w-full outline-none" />
+        </div>
+        <div>
+          <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">Alertar condicional pendente após quantos dias?</label>
+          <input type="number" value={local.diasAlertaCondicional} onChange={(e) => setLocal({ ...local, diasAlertaCondicional: Number(e.target.value) })} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 10 }} className="px-3 py-2 w-full outline-none" />
+        </div>
+      </div>
+      <SectionLabel>Faixas de comissão</SectionLabel>
+      <div style={{ background: T.card, border: `1px solid ${T.line}`, borderRadius: 20 }} className="p-4 space-y-3 mb-4">
+        {local.tiers.map((t, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <div className="flex-1">
+              <label style={{ color: T.inkSoft, fontSize: 11 }}>a partir de R$</label>
+              <input type="number" value={t.min} onChange={(e) => updateTier(i, "min", e.target.value)} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 8 }} className="px-2 py-1.5 w-full outline-none" />
+            </div>
+            <div style={{ width: 90 }}>
+              <label style={{ color: T.inkSoft, fontSize: 11 }}>%</label>
+              <input type="number" value={t.pct} onChange={(e) => updateTier(i, "pct", e.target.value)} style={{ color: T.ink, border: `1px solid ${T.line}`, borderRadius: 8 }} className="px-2 py-1.5 w-full outline-none" />
+            </div>
+            <button onClick={() => removeTier(i)} style={{ color: T.rose, background: "none", border: "none" }} className="mt-4"><Icon name="Trash2" size={16} /></button>
+          </div>
+        ))}
+        <button onClick={addTier} style={{ color: T.green, fontSize: 13, background: "none", border: "none" }} className="flex items-center gap-1"><Icon name="Plus" size={13} /> adicionar faixa</button>
+      </div>
+      <button onClick={save} style={{ background: T.green, color: "#fff", borderRadius: 12, fontWeight: 600, border: "none", width: "100%", padding: "12px 0" }}>{savedFlash ? "Salvo ✓" : "Salvar configurações"}</button>
+    </div>
+  );
+}
+
+// ---------- Modals ----------
+function PhotoModal({ sale, onClose }) {
+  const T = useContext(ThemeContext);
+  if (!sale) return null;
+  return (
+    <div onClick={onClose} style={{ background: "rgba(0,0,0,0.75)" }} className="fixed inset-0 z-50 flex items-center justify-center p-6">
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: 16 }} className="max-w-sm w-full p-4">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }} className="mb-3">
+          <div style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 18 }}>{brl(sale.valor)}</div>
+          <button onClick={onClose} style={{ color: T.inkSoft, background: "none", border: "none" }}><Icon name="X" size={20} /></button>
+        </div>
+        {sale.foto ? <img src={sale.foto} alt="comprovante" style={{ width: "100%", borderRadius: 10 }} /> : <div style={{ color: T.inkSoft }} className="text-center py-10 text-sm">Sem foto anexada nesta venda.</div>}
+        <div style={{ color: T.inkSoft, fontSize: 13 }} className="mt-3">
+          {new Date(sale.date + "T00:00:00").toLocaleDateString("pt-BR")}{sale.clienteNome ? ` · ${sale.clienteNome}` : ""}{sale.caixa ? ` · ${sale.caixa}` : ""}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmModal({ sale, onClose, onConfirm }) {
+  const T = useContext(ThemeContext);
+  const [valor, setValor] = useState(sale ? String(sale.valorLevado) : "");
+  useEffect(() => { if (sale) setValor(String(sale.valorLevado)); }, [sale]);
+  if (!sale) return null;
+  const num = parseFloat(String(valor).replace(",", "."));
+  const valid = !isNaN(num) && num >= 0;
+  return (
+    <div onClick={onClose} style={{ background: "rgba(0,0,0,0.75)" }} className="fixed inset-0 z-50 flex items-center justify-center p-6">
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: 16 }} className="max-w-sm w-full p-4">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }} className="mb-3">
+          <div style={{ fontFamily: "'Fraunces', serif", color: T.ink, fontSize: 18 }}>Confirmar condicional</div>
+          <button onClick={onClose} style={{ color: T.inkSoft, background: "none", border: "none" }}><Icon name="X" size={20} /></button>
+        </div>
+        {sale.foto && <img src={sale.foto} alt="comprovante" style={{ width: "100%", borderRadius: 10 }} className="mb-3" />}
+        <div style={{ color: T.inkSoft, fontSize: 13 }} className="mb-3">{sale.clienteNome} levou <b style={{ color: T.ink }}>{brl(sale.valorLevado)}</b> em {new Date(sale.dataLevado + "T00:00:00").toLocaleDateString("pt-BR")}</div>
+        <label style={{ color: T.inkSoft, fontSize: 12 }} className="block mb-1">Quanto ela ficou / comprou de fato?</label>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }} className="mb-4">
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: T.ink }}>R$</span>
+          <input inputMode="decimal" value={valor} onChange={(e) => setValor(e.target.value)}
+            style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, color: T.ink, background: "transparent", width: "100%", padding: "4px 0", border: "none", borderBottom: `2px solid ${T.line}` }} className="outline-none" />
+        </div>
+        <button onClick={() => valid && onConfirm(sale, num)} disabled={!valid}
+          style={{ background: valid ? T.green : T.line, color: valid ? "#fff" : T.inkSoft, borderRadius: 12, fontWeight: 600, border: "none", width: "100%", padding: "12px 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          <Icon name="PackageCheck" size={18} /> Confirmar venda
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- App ----------
+function App() {
+  const [tab, setTab] = useState("inicio");
+  const [sales, setSales] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [month, setMonth] = useState(monthKey(todayISO()));
+  const [openSale, setOpenSale] = useState(null);
+  const [confirmSale, setConfirmSale] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const idx = await storage.list("sale:");
+      const loaded = [];
+      for (const k of idx.keys) { const r = await storage.get(k); if (r?.value) loaded.push(JSON.parse(r.value)); }
+      setSales(loaded);
+      const cidx = await storage.list("client:");
+      const loadedClients = [];
+      for (const k of cidx.keys) { const r = await storage.get(k); if (r?.value) loadedClients.push(JSON.parse(r.value)); }
+      setClients(loadedClients);
+      const s = await storage.get("settings");
+      if (s?.value) setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(s.value) });
+      setLoading(false);
+    })();
+  }, []);
+
+  const upsertClient = useCallback(async (input) => {
+    let client;
+    const existingById = input.id && clients.find((c) => c.id === input.id);
+    const existingByName = !input.id && clients.find((c) => c.nome.trim().toLowerCase() === input.nome.trim().toLowerCase());
+    const match = existingById || existingByName;
+    if (match) client = { ...match, telefone: input.telefone || match.telefone, aniversario: input.aniversario || match.aniversario };
+    else client = { id: uid(), nome: input.nome.trim(), telefone: input.telefone || "", aniversario: input.aniversario || "", createdAt: todayISO() };
+    await storage.set(`client:${client.id}`, JSON.stringify(client));
+    setClients((prev) => (prev.some((c) => c.id === client.id) ? prev.map((c) => (c.id === client.id ? client : c)) : [...prev, client]));
+    return client;
+  }, [clients]);
+
+  const saveSale = useCallback(async (saleInput) => {
+    setSaving(true);
+    try {
+      let clienteId = saleInput.clienteId, clienteNome = saleInput.clienteNome;
+      if (clienteNome) {
+        const client = await upsertClient({ id: clienteId, nome: clienteNome, telefone: saleInput.clienteTelefone, aniversario: saleInput.clienteAniversario });
+        clienteId = client.id; clienteNome = client.nome;
+      }
+      const sale = { ...saleInput, clienteId, clienteNome };
+      await storage.set(`sale:${sale.id}`, JSON.stringify(sale));
+      setSales((prev) => [sale, ...prev]);
+      setTab("vendas"); setMonth(monthKey(sale.date));
+    } finally { setSaving(false); }
+  }, [upsertClient]);
+
+  const deleteSale = useCallback(async (sale) => {
+    if (!confirm("Excluir esta venda registrada?")) return;
+    await storage.delete(`sale:${sale.id}`);
+    setSales((prev) => prev.filter((s) => s.id !== sale.id));
+  }, []);
+
+  const toggleConferida = useCallback(async (sale) => {
+    const updated = { ...sale, conferida: !sale.conferida };
+    await storage.set(`sale:${sale.id}`, JSON.stringify(updated));
+    setSales((prev) => prev.map((s) => (s.id === sale.id ? updated : s)));
+  }, []);
+
+  const confirmCondicional = useCallback(async (sale, valorFinal) => {
+    const updated = { ...sale, status: "confirmada", valor: valorFinal, date: todayISO(), dataConfirmacao: todayISO() };
+    await storage.set(`sale:${sale.id}`, JSON.stringify(updated));
+    setSales((prev) => prev.map((s) => (s.id === sale.id ? updated : s)));
+    setConfirmSale(null); setMonth(monthKey(updated.date)); setTab("vendas");
+  }, []);
+
+  const saveSettings = useCallback(async (newSettings) => { await storage.set("settings", JSON.stringify(newSettings)); setSettings(newSettings); }, []);
+  const toggleDarkMode = () => saveSettings({ ...settings, darkMode: !settings.darkMode });
+  const T = settings.darkMode ? DARK : LIGHT;
+
+  const tabs = [
+    { id: "inicio", label: "Início", icon: "Home" },
+    { id: "registrar", label: "Registrar", icon: "Plus" },
+    { id: "vendas", label: "Vendas", icon: "List" },
+    { id: "clientes", label: "Clientes", icon: "Users" },
+    { id: "desempenho", label: "Metas", icon: "TrendingUp" },
+    { id: "config", label: "Ajustes", icon: "Settings" },
+  ];
+
+  return (
+    <ThemeContext.Provider value={T}>
+      <div style={{ background: T.bg, minHeight: "100vh" }}>
+        <div style={{ maxWidth: 480, margin: "0 auto", position: "relative" }}>
+          <div style={{ background: T.greenDark, padding: "18px 20px 14px" }} className="flex items-center justify-between text-white">
+            <div>
+              <div style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 700 }}>{settings.loja}</div>
+              <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 12 }}>controle pessoal de vendas</div>
+            </div>
+            <button onClick={toggleDarkMode} style={{ color: "#fff", background: "none", border: "none" }} aria-label="Alternar tema">
+              <Icon name={settings.darkMode ? "Sun" : "Moon"} size={20} />
+            </button>
+          </div>
+
+          {loading ? (
+            <div className="flex items-center justify-center py-20"><Icon name="Loader2" size={28} style={{ color: T.green }} /></div>
+          ) : (
+            <>
+              {tab === "inicio" && <InicioTab sales={sales} settings={settings} goToRegistrar={() => setTab("registrar")} />}
+              {tab === "registrar" && <RegistrarTab clients={clients} onSave={saveSale} saving={saving} />}
+              {tab === "vendas" && <VendasTab sales={sales} month={month} setMonth={setMonth} onOpen={setOpenSale} onConfirm={setConfirmSale} onDelete={deleteSale} onToggleConferida={toggleConferida} />}
+              {tab === "clientes" && <ClientesTab clients={clients} sales={sales} onUpsertClient={upsertClient} />}
+              {tab === "desempenho" && <DesempenhoTab sales={sales} month={month} setMonth={setMonth} settings={settings} />}
+              {tab === "config" && <ConfigTab settings={settings} onSave={saveSettings} />}
+            </>
+          )}
+
+          <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: T.card, borderTop: `1px dashed ${T.line}` }} className="flex justify-around py-2">
+            {tabs.map((t) => {
+              const active = tab === t.id;
+              return (
+                <button key={t.id} onClick={() => setTab(t.id)} style={{ color: active ? T.green : T.inkSoft, background: "none", border: "none", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "4px 6px" }}>
+                  <Icon name={t.icon} size={18} />
+                  <span style={{ fontSize: 9.5 }}>{t.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <PhotoModal sale={openSale} onClose={() => setOpenSale(null)} />
+          <ConfirmModal sale={confirmSale} onClose={() => setConfirmSale(null)} onConfirm={confirmCondicional} />
+        </div>
+      </div>
+    </ThemeContext.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
